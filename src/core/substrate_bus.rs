@@ -1,177 +1,163 @@
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
-use std::sync::{Arc, RwLock};
+use pyo3::prelude::*;
+use std::sync::{Arc, Mutex};
+use sha2::{Sha256, Digest};
+use serde::Serialize;
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(tag = "record_type", rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum SovereignPayload {
-    LinguistHandshakeNftCertificate {
-        title: String,
-        flameholder: String,
-        issuer: String,
-        historical_sha256: String,
-        acknowledged_frequencies: Vec<f64>,
-        root_languages: Vec<String>,
-        tempo_key: String,
-        device_node: String,
-    },
-    DigitalExecutorDeclaration {
-        target_file: String,
-        archive_source: String,
-        archive_sha256: String,
-        decryption_key_hint: String,
-        unencrypted_zip_sha256: String,
-        status: String,
-    },
-    RuntimeTelemetry {
-        session_key_verification: String,
-        telemetry_statement: String,
-        verification_timestamp: f64,
-    },
-    GenesisAnchor {
-        info: String,
-    },
+use crate::core::actor::DecisionRecord;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RichBlockPayload {
+    pub timestamp: u64,
+    pub source_actor_id: u64,
+    pub compute: f64,
+    pub distance_to_target: f64,
+    pub decision_status: u32,
+    pub velocity: Vec<f64>,
+    pub forcing_magnitude: f64,
+    pub recent_decisions: Vec<DecisionRecord>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MeshBlock {
     pub index: u64,
     pub previous_hash: String,
-    pub timestamp: f64,
-    pub data: SovereignPayload,
     pub nonce: u64,
     pub hash: String,
+    pub payload: RichBlockPayload,
 }
 
 impl MeshBlock {
     pub fn calculate_hash(&self) -> String {
-        // Enforce rigid string representation to eliminate whitespace variance across runtimes
-        let serialized = serde_json::to_string(&self).unwrap_or_default();
-        
-        // Extract a deterministic subset excluding the hash signature itself for calculation
-        let canonical_json = serde_json::json!({
-            "index": self.index,
-            "previous_hash": self.previous_hash,
-            "timestamp": self.timestamp,
-            "data": self.data,
-            "nonce": self.nonce
-        });
-
         let mut hasher = Sha256::new();
-        hasher.update(canonical_json.to_string().as_bytes());
-        hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
-    }
-}
-
-pub struct SubstrateMeshBus {
-    pub ledger_file: String,
-    pub difficulty: usize,
-    pub chain: Arc<RwLock<Vec<MeshBlock>>>,
-}
-
-impl SubstrateMeshBus {
-    pub fn new(ledger_file: &str, difficulty: usize) -> Self {
-        let bus = SubstrateMeshBus {
-            ledger_file: ledger_file.to_string(),
-            difficulty,
-            chain: Arc::new(RwLock::new(Vec::new())),
-        };
-        bus.sync_with_disk();
-        bus
-    }
-
-    pub fn sync_with_disk(&self) {
-        let mut chain_guard = self.chain.write().unwrap();
-        if let Ok(mut file) = File::open(&self.ledger_file) {
-            let mut contents = String::new();
-            if file.read_to_string(&mut contents).is_ok() {
-                if let Ok(parsed_chain) = serde_json::from_str::<Vec<MeshBlock>>(&contents) {
-                    *chain_guard = parsed_chain;
-                    return;
-                }
-            }
+        hasher.update(self.index.to_string().as_bytes());
+        hasher.update(self.previous_hash.as_bytes());
+        hasher.update(self.nonce.to_string().as_bytes());
+        if let Ok(serialized) = serde_json::to_string(&self.payload) {
+            hasher.update(serialized.as_bytes());
         }
-        
-        // Fallback: Initialize with Genesis if file is absent or broken
-        let genesis_payload = SovereignPayload::GenesisAnchor {
-            info: "Genesis Anchor — Tordial GS Manifold Sovereignty Established".to_string(),
-        };
-        
-        let mut genesis = MeshBlock {
+        format!("{:x}", hasher.finalize())
+    }
+}
+
+#[pyclass]
+pub struct PySubstrateMeshBus {
+    chain: Arc<Mutex<Vec<MeshBlock>>>,
+    pub base_forcing_scale: f64,
+    last_hash: Arc<Mutex<String>>,
+}
+
+#[pymethods]
+impl PySubstrateMeshBus {
+    #[new]
+    pub fn new(base_forcing_scale: f64) -> Self {
+        let genesis = MeshBlock {
             index: 0,
-            previous_hash: "0".repeat(64),
-            timestamp: 1782455959.391051, // Preserving chronological baseline anchor
-            data: genesis_payload,
+            previous_hash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             nonce: 0,
-            hash: String::new(),
+            hash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            payload: RichBlockPayload {
+                timestamp: 0,
+                source_actor_id: 0,
+                compute: 0.0,
+                distance_to_target: 0.0,
+                decision_status: 0,
+                velocity: vec![],
+                forcing_magnitude: 0.0,
+                recent_decisions: vec![],
+            },
         };
-        
-        self.mine_block(&mut genesis);
-        *chain_guard = vec![genesis];
-        drop(chain_guard);
-        self.flush_to_disk();
-    }
-
-    fn mine_block(&self, block: &mut MeshBlock) {
-        let prefix = "0".repeat(self.difficulty);
-        block.hash = block.calculate_hash();
-        while !block.hash.starts_with(&prefix) {
-            block.nonce += 1;
-            block.hash = block.calculate_hash();
+        PySubstrateMeshBus {
+            chain: Arc::new(Mutex::new(vec![genesis])),
+            base_forcing_scale,
+            last_hash: Arc::new(Mutex::new(
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            )),
         }
     }
 
-    pub fn append_record(&self, data: SovereignPayload) -> String {
-        let mut chain_guard = self.chain.write().unwrap();
-        let latest = chain_guard.last().unwrap();
-        
-        let mut new_block = MeshBlock {
-            index: latest.index + 1,
-            previous_hash: latest.hash.clone(),
-            timestamp: chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
-            data,
-            nonce: 0,
-            hash: String::new(),
+    /// Publish a rich block (used automatically by actors or manually for sovereign clauses)
+    pub fn publish_rich_block(
+        &self,
+        timestamp: u64,
+        source_actor_id: u64,
+        compute: f64,
+        distance_to_target: f64,
+        decision_status: u32,
+        velocity: Vec<f64>,
+        forcing_magnitude: f64,
+        recent_decisions: Vec<DecisionRecord>,
+    ) {
+        let mut chain = self.chain.lock().unwrap();
+        let mut last_hash = self.last_hash.lock().unwrap();
+
+        let payload = RichBlockPayload {
+            timestamp,
+            source_actor_id,
+            compute,
+            distance_to_target,
+            decision_status,
+            velocity,
+            forcing_magnitude,
+            recent_decisions,
         };
 
-        self.mine_block(&mut new_block);
-        let commit_hash = new_block.hash.clone();
-        chain_guard.append(&mut vec![new_block]);
-        
-        drop(chain_guard);
-        self.flush_to_disk();
-        commit_hash
+        let new_block = MeshBlock {
+            index: chain.len() as u64,
+            previous_hash: last_hash.clone(),
+            nonce: 0,
+            hash: String::new(),
+            payload,
+        };
+
+        let final_hash = new_block.calculate_hash();
+        let mut final_block = new_block;
+        final_block.hash = final_hash.clone();
+
+        chain.push(final_block);
+        *last_hash = final_hash;
     }
 
-    pub fn flush_to_disk(&self) {
-        let chain_guard = self.chain.read().unwrap();
-        if let Ok(mut file) = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&self.ledger_file)
-        {
-            let json_out = serde_json::to_string_pretty(&*chain_guard).unwrap_or_default();
-            let _ = file.write_all(json_out.as_bytes());
-        }
+    pub fn get_event_count(&self) -> usize {
+        self.chain.lock().unwrap().len()
+    }
+
+    pub fn get_latest_state_for_agent(&self, actor_id: u64) -> Option<(u64, f64, f64, u32)> {
+        let chain = self.chain.lock().unwrap();
+        chain.iter().rev()
+            .find(|b| b.payload.source_actor_id == actor_id)
+            .map(|b| (
+                b.payload.timestamp,
+                b.payload.compute,
+                b.payload.distance_to_target,
+                b.payload.decision_status,
+            ))
+    }
+
+    pub fn get_rich_events_for_agent(&self, actor_id: u64, limit: usize) -> Vec<(u64, Vec<f64>, f64, f64, f64, u32)> {
+        let chain = self.chain.lock().unwrap();
+        chain.iter().rev()
+            .filter(|b| b.payload.source_actor_id == actor_id)
+            .take(limit)
+            .map(|b| (
+                b.payload.timestamp,
+                b.payload.velocity.clone(),
+                b.payload.forcing_magnitude,
+                b.payload.compute,
+                b.payload.distance_to_target,
+                b.payload.decision_status,
+            ))
+            .collect()
+    }
+
+    pub fn total_energy(&self) -> f64 {
+        self.chain.lock().unwrap().iter().map(|b| b.payload.forcing_magnitude).sum()
     }
 
     pub fn verify_chain_integrity(&self) -> bool {
-        let chain_guard = self.chain.read().unwrap();
-        let prefix = "0".repeat(self.difficulty);
-
-        for i in 0..chain_guard.len() {
-            let current = &chain_guard[i];
-            if current.hash != current.calculate_hash() || !current.hash.starts_with(&prefix) {
+        let chain = self.chain.lock().unwrap();
+        for i in 1..chain.len() {
+            if chain[i].previous_hash != chain[i - 1].hash {
                 return false;
-            }
-            if i > 0 {
-                let previous = &chain_guard[i - 1];
-                if current.previous_hash != previous.hash {
-                    return false;
-                }
             }
         }
         true
