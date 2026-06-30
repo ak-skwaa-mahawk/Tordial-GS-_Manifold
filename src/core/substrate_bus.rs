@@ -40,10 +40,11 @@ impl MeshBlock {
 }
 
 #[pyclass]
+#[derive(Clone)]
 pub struct PySubstrateMeshBus {
-    chain: Arc<Mutex<Vec<MeshBlock>>>,
+    pub chain: Arc<Mutex<Vec<MeshBlock>>>,
     pub base_forcing_scale: f64,
-    last_hash: Arc<Mutex<String>>,
+    pub last_hash: Arc<Mutex<String>>,
 }
 
 #[pymethods]
@@ -75,7 +76,6 @@ impl PySubstrateMeshBus {
         }
     }
 
-    /// Publish a rich block (used automatically by actors or manually for sovereign clauses)
     pub fn publish_rich_block(
         &self,
         timestamp: u64,
@@ -115,6 +115,48 @@ impl PySubstrateMeshBus {
 
         chain.push(final_block);
         *last_hash = final_hash;
+    }
+
+    /// Explicitly post structured Sovereign Clauses directly down to the chain layout format
+    pub fn publish_sovereign_clause(&self, timestamp: u64, identifier_code: u64, statements: String) -> String {
+        let mut chain = self.chain.lock().unwrap();
+        let mut last_hash = self.last_hash.lock().unwrap();
+
+        // Map loose string inputs safely to structured DecisionRecord parameters for serialization matching
+        let custom_clause = DecisionRecord {
+            timestamp,
+            initial_distance: identifier_code as f64,
+            trial_distance: 0.0,
+            utility_gain: 0.0,
+            status: 99, // 99 Enforces a hardcoded constant flag indicating a sovereign clause write
+        };
+
+        let payload = RichBlockPayload {
+            timestamp,
+            source_actor_id: 8888, // 8888 sets the system-wide static indicator for an administrative macro event
+            compute: 0.0,
+            distance_to_target: 0.0,
+            decision_status: 1,
+            velocity: vec![],
+            forcing_magnitude: 0.0,
+            recent_decisions: vec![custom_clause],
+        };
+
+        let mut new_block = MeshBlock {
+            index: chain.len() as u64,
+            previous_hash: last_hash.clone(),
+            nonce: 0,
+            hash: String::new(),
+            payload,
+        };
+
+        new_block.hash = new_block.calculate_hash();
+        let committed_hash = new_block.hash.clone();
+        
+        chain.push(new_block);
+        *last_hash = committed_hash.clone();
+        
+        committed_hash
     }
 
     pub fn get_event_count(&self) -> usize {
