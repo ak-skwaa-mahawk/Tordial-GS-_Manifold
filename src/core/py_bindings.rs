@@ -21,7 +21,8 @@ impl PyCombiner {
 
     pub fn register_to_bus(&mut self, bus: &PySubstrateMeshBus) {
         if let Ok(mut actor) = self.inner.lock() {
-            actor.register_bus(Arc::new(Mutex::new(PySubstrateMeshBus::new(bus.base_forcing_scale))));
+            // Unify the allocation fields so actor mutations append to the master timeline instantly
+            actor.register_bus(bus.clone());
         }
     }
 
