@@ -1,3 +1,22 @@
+use pyo3::prelude::*;
+
+pub mod core {
+    pub mod actor;
+    pub mod substrate_bus;
+    pub mod py_bindings;
+}
+
+use core::substrate_bus::PySubstrateMeshBus;
+use core::py_bindings::PyCombiner;
+
+#[pymodule]
+fn tordial_gs_manifold(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PySubstrateMeshBus>()?;
+    m.add_class::<PyCombiner>()?;
+    Ok(())
+}
+
+
 use std::ffi::{CString};
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicU64, Ordering};
